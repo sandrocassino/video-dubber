@@ -1,4 +1,3 @@
-requirements.txt
 streamlit
    azure-cognitiveservices-speech
    azure-ai-translation-text

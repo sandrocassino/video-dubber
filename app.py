@@ -59,32 +59,41 @@ def extract_audio(video_path, audio_path):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def separate_vocals_replicate(audio_path, tmpdir):
-    """Separate vocals and create instrumental using phase inversion"""
+    """Remove vocals (index 2) and keep bass + drums + other"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
             "lucataco/mvsep-mdx23-music-separation:510b9b91aec1bfa7d634e6c06ee80c18492fb0fc06aa1474533fbda90dd3dba4",
-            input={
-                "audio": audio_file
-            }
+            input={"audio": audio_file}
         )
     
-    # Get the vocals track (index 2)
-    vocals_path = os.path.join(tmpdir, "separated_vocals.wav")
+    # Download bass (0), drums (1), other (3) - SKIP vocals (2)!
+    bass_path = os.path.join(tmpdir, "bass.wav")
+    drums_path = os.path.join(tmpdir, "drums.wav")
+    other_path = os.path.join(tmpdir, "other.wav")
     
-    if len(output) > 2:
-        with open(vocals_path, 'wb') as f:
-            f.write(output[2].read())
+    # Index 0 = bass
+    if len(output) > 0:
+        with open(bass_path, 'wb') as f:
+            f.write(output[0].read())
     
-    # Create instrumental by inverting vocals phase and mixing with original
-    # This cancels out the vocals from the original audio
+    # Index 1 = drums
+    if len(output) > 1:
+        with open(drums_path, 'wb') as f:
+            f.write(output[1].read())
+    
+    # Index 3 = other (SKIP index 2 = vocals!)
+    if len(output) > 3:
+        with open(other_path, 'wb') as f:
+            f.write(output[3].read())
+    
+    # Combine bass + drums + other = instrumental WITHOUT vocals
     instrumental_path = os.path.join(tmpdir, "instrumental.wav")
     cmd = [
         'ffmpeg',
-        '-i', audio_path,          # Original audio
-        '-i', vocals_path,          # Separated vocals
-        '-filter_complex', 
-        '[1:a]aeval=val(0)*-1:c=same[inverted];'  # Invert phase of vocals
-        '[0:a][inverted]amix=inputs=2:duration=longest[out]',  # Mix original with inverted vocals
+        '-i', bass_path,
+        '-i', drums_path,
+        '-i', other_path,
+        '-filter_complex', '[0:a][1:a][2:a]amix=inputs=3:duration=longest[out]',
         '-map', '[out]',
         '-ar', '44100',
         '-ac', '2',
@@ -307,10 +316,10 @@ if uploaded_file and st.button("🚀 Start Dubbing"):
                 new_vocals_path = os.path.join(tmpdir, "dubbed_vocals.wav")
                 create_timed_audio(translated_segments, target_lang, new_vocals_path, tmpdir)
                 
-                st.write("🎵 Audio splitsen - originele stem verwijderen (Replicate AI)...")
+                st.write("🎵 Audio splitsen - Nederlandse stem verwijderen (AI)...")
                 instrumental_path = separate_vocals_replicate(audio_path, tmpdir)
                 
-                st.write("🎵 Nieuwe vocals + instrumental mixen...")
+                st.write("🎵 Nieuwe Portugese vocals + muziek mixen...")
                 mixed_audio = os.path.join(tmpdir, "mixed.wav")
                 mix_vocals_and_background(new_vocals_path, instrumental_path, mixed_audio)
                 

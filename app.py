@@ -59,41 +59,48 @@ def extract_audio(video_path, audio_path):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def separate_vocals_replicate(audio_path, tmpdir):
-    """Remove vocals (index 2) and keep bass + drums + other"""
+    """Remove vocals (index 3) and keep all other audio (1, 2, 4, 5)"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
             "lucataco/mvsep-mdx23-music-separation:510b9b91aec1bfa7d634e6c06ee80c18492fb0fc06aa1474533fbda90dd3dba4",
             input={"audio": audio_file}
         )
     
-    # Download bass (0), drums (1), other (3) - SKIP vocals (2)!
-    bass_path = os.path.join(tmpdir, "bass.wav")
-    drums_path = os.path.join(tmpdir, "drums.wav")
-    other_path = os.path.join(tmpdir, "other.wav")
+    # Download indices 1, 2, 4, 5 (SKIP 0=empty and 3=vocals!)
+    track1_path = os.path.join(tmpdir, "track1.wav")
+    track2_path = os.path.join(tmpdir, "track2.wav")
+    track4_path = os.path.join(tmpdir, "track4.wav")
+    track5_path = os.path.join(tmpdir, "track5.wav")
     
-    # Index 0 = bass
-    if len(output) > 0:
-        with open(bass_path, 'wb') as f:
-            f.write(output[0].read())
-    
-    # Index 1 = drums
+    # Index 1
     if len(output) > 1:
-        with open(drums_path, 'wb') as f:
+        with open(track1_path, 'wb') as f:
             f.write(output[1].read())
     
-    # Index 3 = other (SKIP index 2 = vocals!)
-    if len(output) > 3:
-        with open(other_path, 'wb') as f:
-            f.write(output[3].read())
+    # Index 2
+    if len(output) > 2:
+        with open(track2_path, 'wb') as f:
+            f.write(output[2].read())
     
-    # Combine bass + drums + other = instrumental WITHOUT vocals
+    # Index 4 (SKIP 3 = vocals!)
+    if len(output) > 4:
+        with open(track4_path, 'wb') as f:
+            f.write(output[4].read())
+    
+    # Index 5
+    if len(output) > 5:
+        with open(track5_path, 'wb') as f:
+            f.write(output[5].read())
+    
+    # Combine 1 + 2 + 4 + 5 = instrumental WITHOUT vocals
     instrumental_path = os.path.join(tmpdir, "instrumental.wav")
     cmd = [
         'ffmpeg',
-        '-i', bass_path,
-        '-i', drums_path,
-        '-i', other_path,
-        '-filter_complex', '[0:a][1:a][2:a]amix=inputs=3:duration=longest[out]',
+        '-i', track1_path,
+        '-i', track2_path,
+        '-i', track4_path,
+        '-i', track5_path,
+        '-filter_complex', '[0:a][1:a][2:a][3:a]amix=inputs=4:duration=longest[out]',
         '-map', '[out]',
         '-ar', '44100',
         '-ac', '2',
@@ -103,7 +110,6 @@ def separate_vocals_replicate(audio_path, tmpdir):
     subprocess.run(cmd, check=True, capture_output=True)
     
     return instrumental_path
-
 def convert_to_mono_16k(input_path, output_path):
     """Convert audio for Azure Speech (16kHz mono)"""
     cmd = ['ffmpeg', '-i', input_path, '-ar', '16000', '-ac', '1', output_path, '-y']

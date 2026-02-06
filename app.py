@@ -20,18 +20,35 @@ TRANSLATOR_REGION = st.secrets.get("TRANSLATOR_REGION", "westeurope")
 os.environ["REPLICATE_API_TOKEN"] = st.secrets.get("REPLICATE_API_TOKEN", "")
 
 st.title("🎬 Video Dubbing voor Hans")
-st.write("Upload video, kies taal, download result")
+st.write("Upload video, kies talen, download result")
 
+# Source language selector
+source_lang = st.selectbox(
+    "Van welke taal? (taal in video)",
+    ["nl-NL", "en-US", "es-ES", "fr-FR", "de-DE", "pt-PT", "pt-BR"],
+    format_func=lambda x: {
+        "nl-NL": "Nederlands",
+        "en-US": "Engels",
+        "es-ES": "Spaans",
+        "fr-FR": "Frans",
+        "de-DE": "Duits",
+        "pt-PT": "Portugees (Portugal)",
+        "pt-BR": "Portugees (Brazilië)"
+    }[x]
+)
+
+# Target language selector
 target_lang = st.selectbox(
     "Naar welke taal?",
-    ["pt-PT", "pt-BR", "es-ES", "fr-FR", "de-DE", "nl-NL"],
+    ["pt-PT", "pt-BR", "es-ES", "fr-FR", "de-DE", "nl-NL", "en-US"],
     format_func=lambda x: {
         "pt-PT": "Portugees (Portugal)",
         "pt-BR": "Portugees (Brazilië)", 
         "es-ES": "Spaans",
         "fr-FR": "Frans",
         "de-DE": "Duits",
-        "nl-NL": "Nederlands"
+        "nl-NL": "Nederlands",
+        "en-US": "Engels"
     }[x]
 )
 
@@ -42,7 +59,7 @@ def extract_audio(video_path, audio_path):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def separate_vocals_replicate(audio_path, tmpdir):
-    """Separate vocals using Replicate's MVSep MDX23 model"""
+    """Separate vocals and create instrumental using Replicate's MVSep MDX23 model"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
             "lucataco/mvsep-mdx23-music-separation:510b9b91aec1bfa7d634e6c06ee80c18492fb0fc06aa1474533fbda90dd3dba4",
@@ -52,31 +69,52 @@ def separate_vocals_replicate(audio_path, tmpdir):
         )
     
     # Output is list with 4 items: bass, drums, vocals, other
-    vocals_path = os.path.join(tmpdir, "vocals.wav")
-    other_path = os.path.join(tmpdir, "accompaniment.wav")
+    # We need instrumental = bass + drums + other (WITHOUT vocals!)
     
-    # Index 2 is vocals, index 3 is "other" (accompaniment)
-    # Download vocals (index 2)
-    if len(output) > 2:
-        with open(vocals_path, 'wb') as f:
-            f.write(output[2].read())
+    bass_path = os.path.join(tmpdir, "bass.wav")
+    drums_path = os.path.join(tmpdir, "drums.wav")
+    other_path = os.path.join(tmpdir, "other.wav")
     
-    # Download other/accompaniment (index 3)
+    # Download all stems EXCEPT vocals (index 2)
+    if len(output) > 0:
+        with open(bass_path, 'wb') as f:
+            f.write(output[0].read())  # bass
+    
+    if len(output) > 1:
+        with open(drums_path, 'wb') as f:
+            f.write(output[1].read())  # drums
+    
     if len(output) > 3:
         with open(other_path, 'wb') as f:
-            f.write(output[3].read())
+            f.write(output[3].read())  # other
     
-    return vocals_path, other_path
+    # Mix bass + drums + other to create instrumental without vocals
+    instrumental_path = os.path.join(tmpdir, "instrumental.wav")
+    cmd = [
+        'ffmpeg',
+        '-i', bass_path,
+        '-i', drums_path,
+        '-i', other_path,
+        '-filter_complex', '[0:a][1:a][2:a]amix=inputs=3:duration=longest[out]',
+        '-map', '[out]',
+        '-ar', '44100',
+        '-ac', '2',
+        instrumental_path,
+        '-y'
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    
+    return instrumental_path
 
 def convert_to_mono_16k(input_path, output_path):
     """Convert audio for Azure Speech (16kHz mono)"""
     cmd = ['ffmpeg', '-i', input_path, '-ar', '16000', '-ac', '1', output_path, '-y']
     subprocess.run(cmd, check=True, capture_output=True)
 
-def transcribe_audio_with_timing(audio_path):
+def transcribe_audio_with_timing(audio_path, source_language):
     """Transcribe with timestamps per segment"""
     speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
-    speech_config.speech_recognition_language = "en-US"
+    speech_config.speech_recognition_language = source_language
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
     audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
@@ -112,10 +150,12 @@ def transcribe_audio_with_timing(audio_path):
     speech_recognizer.stop_continuous_recognition()
     return segments
 
-def translate_segments(segments, target_language):
+def translate_segments(segments, source_language, target_language):
     """Translate each segment separately"""
     credential = AzureKeyCredential(TRANSLATOR_KEY)
     client = TextTranslationClient(endpoint=TRANSLATOR_ENDPOINT, credential=credential, region=TRANSLATOR_REGION)
+    
+    source_lang_code = source_language.split('-')[0]
     target_lang_code = target_language.split('-')[0]
     
     translated_segments = []
@@ -123,7 +163,7 @@ def translate_segments(segments, target_language):
         response = client.translate(
             body=[{"text": seg['text']}],
             to_language=[target_lang_code],
-            from_language="en"
+            from_language=source_lang_code
         )
         translated_segments.append({
             'text': response[0].translations[0].text,
@@ -143,7 +183,8 @@ def synthesize_segment(text, language, output_path):
         "es-ES": "es-ES-AlvaroNeural",
         "fr-FR": "fr-FR-HenriNeural",
         "de-DE": "de-DE-ConradNeural",
-        "nl-NL": "nl-NL-MaartenNeural"
+        "nl-NL": "nl-NL-MaartenNeural",
+        "en-US": "en-US-GuyNeural"
     }
     speech_config.speech_synthesis_voice_name = voices.get(language)
     audio_config = speechsdk.audio.AudioOutputConfig(filename=output_path)
@@ -199,7 +240,7 @@ def create_timed_audio(segments, language, output_path, tmpdir):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def mix_vocals_and_background(vocals_path, background_path, output_path):
-    """Mix new vocals with original background audio"""
+    """Mix new vocals with instrumental background"""
     cmd = [
         'ffmpeg',
         '-i', vocals_path,
@@ -234,32 +275,55 @@ if uploaded_file and st.button("🚀 Start Dubbing"):
                 convert_to_mono_16k(audio_path, audio_mono)
                 
                 st.write("🎤 Transcriptie met timing...")
-                segments = transcribe_audio_with_timing(audio_mono)
+                segments = transcribe_audio_with_timing(audio_mono, source_lang)
                 
                 # Check if we got any transcription
                 original_text = ' '.join([s['text'] for s in segments])
                 if not segments or not original_text.strip():
-                    st.warning("⚠️ Geen spraak gedetecteerd in de video. Probeer een video met duidelijkere Engelse spraak.")
+                    st.warning(f"⚠️ Geen spraak gedetecteerd in de video. Zorg dat de video duidelijke spraak heeft in de gekozen taal.")
                     st.stop()
                 
-                st.text_area("Engels", original_text, height=100)
+                # Show source language label dynamically
+                source_lang_label = {
+                    "nl-NL": "Nederlands",
+                    "en-US": "Engels",
+                    "es-ES": "Spaans",
+                    "fr-FR": "Frans",
+                    "de-DE": "Duits",
+                    "pt-PT": "Portugees",
+                    "pt-BR": "Portugees"
+                }.get(source_lang, "Origineel")
+                
+                st.text_area(source_lang_label, original_text, height=100)
                 
                 st.write("🌍 Vertalen...")
-                translated_segments = translate_segments(segments, target_lang)
+                translated_segments = translate_segments(segments, source_lang, target_lang)
                 
                 translated_text = ' '.join([s['text'] for s in translated_segments])
-                st.text_area(f"Vertaald ({target_lang})", translated_text, height=100)
+                
+                # Show target language label dynamically
+                target_lang_label = {
+                    "pt-PT": "Portugees (Portugal)",
+                    "pt-BR": "Portugees (Brazilië)",
+                    "es-ES": "Spaans",
+                    "fr-FR": "Frans",
+                    "de-DE": "Duits",
+                    "nl-NL": "Nederlands",
+                    "en-US": "Engels"
+                }.get(target_lang, "Vertaald")
+                
+                st.text_area(target_lang_label, translated_text, height=100)
                 
                 st.write("🗣️ Nieuwe vocals genereren...")
                 new_vocals_path = os.path.join(tmpdir, "dubbed_vocals.wav")
                 create_timed_audio(translated_segments, target_lang, new_vocals_path, tmpdir)
                 
-                st.write("🎵 Audio splitsen voor background behoud (Replicate AI)...")
-                vocals_path, background_path = separate_vocals_replicate(audio_path, tmpdir)
+                st.write("🎵 Audio splitsen - originele stem verwijderen (Replicate AI)...")
+                instrumental_path = separate_vocals_replicate(audio_path, tmpdir)
                 
-                st.write("🎵 Vocals + background mixen...")
+                st.write("🎵 Nieuwe vocals + instrumental mixen...")
                 mixed_audio = os.path.join(tmpdir, "mixed.wav")
-                mix_vocals_and_background(new_vocals_path, background_path, mixed_audio)
+                mix_vocals_and_background(new_vocals_path, instrumental_path, mixed_audio)
                 
                 st.write("🎬 Video samenvoegen...")
                 output_path = os.path.join(tmpdir, "output.mp4")

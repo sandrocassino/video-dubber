@@ -1,4 +1,5 @@
 streamlit
-   azure-cognitiveservices-speech
-   azure-ai-translation-text
+azure-cognitiveservices-speech
+azure-ai-translation-text
+spleeter
    

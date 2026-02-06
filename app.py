@@ -42,50 +42,30 @@ def extract_audio(video_path, audio_path):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def separate_vocals_replicate(audio_path, tmpdir):
-    """Separate vocals using Replicate's Demucs model"""
+    """Separate vocals using Replicate's MVSep MDX23 model"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
-            "cjwbw/demucs",  # Zonder versie hash - gebruikt automatisch laatste versie
+            "lucataco/mvsep-mdx23-music-separation",
             input={
                 "audio": audio_file,
-                "model": "htdemucs",
-                "stems": "two_stems",  # vocals en accompaniment
-                "stem": "vocals"  # Welke stem we willen
             }
         )
     
-    # Download separated stems
+    # Output is dict with 'vocals', 'bass', 'drums', 'other' URLs
     vocals_path = os.path.join(tmpdir, "vocals.wav")
     other_path = os.path.join(tmpdir, "accompaniment.wav")
     
-    # Output format kan verschillen, probeer beide
-    if isinstance(output, dict):
-        vocals_url = output.get('vocals')
-        other_url = output.get('other') or output.get('accompaniment')
-    elif isinstance(output, list):
-        # Soms komt het als lijst URLs
-        vocals_url = output[0] if len(output) > 0 else None
-        other_url = output[1] if len(output) > 1 else None
-    else:
-        # Single URL
-        vocals_url = str(output)
-        other_url = None
-    
     # Download vocals
-    if vocals_url:
-        response = requests.get(vocals_url)
+    if output.get('vocals'):
+        response = requests.get(output['vocals'])
         with open(vocals_path, 'wb') as f:
             f.write(response.content)
     
-    # Download accompaniment
-    if other_url:
-        response = requests.get(other_url)
+    # Download "other" (everything except vocals)
+    if output.get('other'):
+        response = requests.get(output['other'])
         with open(other_path, 'wb') as f:
             f.write(response.content)
-    else:
-        # Als geen accompaniment URL, maak leeg bestand
-        import shutil
-        shutil.copy(vocals_path, other_path)
     
     return vocals_path, other_path
 

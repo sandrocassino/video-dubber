@@ -45,11 +45,12 @@ def separate_vocals_replicate(audio_path, tmpdir):
     """Separate vocals using Replicate's Demucs model"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
-            "cjwbw/demucs:07afda0d85f5b7f13d1c7fc89db7d1a69d82d45034358cbdc3cfea360c60a068",
+            "cjwbw/demucs",  # Zonder versie hash - gebruikt automatisch laatste versie
             input={
                 "audio": audio_file,
                 "model": "htdemucs",
-                "stems": "vocals"
+                "stems": "two_stems",  # vocals en accompaniment
+                "stem": "vocals"  # Welke stem we willen
             }
         )
     
@@ -57,9 +58,18 @@ def separate_vocals_replicate(audio_path, tmpdir):
     vocals_path = os.path.join(tmpdir, "vocals.wav")
     other_path = os.path.join(tmpdir, "accompaniment.wav")
     
-    # Output is dict with 'vocals' and 'other' URLs
-    vocals_url = output.get('vocals')
-    other_url = output.get('other')
+    # Output format kan verschillen, probeer beide
+    if isinstance(output, dict):
+        vocals_url = output.get('vocals')
+        other_url = output.get('other') or output.get('accompaniment')
+    elif isinstance(output, list):
+        # Soms komt het als lijst URLs
+        vocals_url = output[0] if len(output) > 0 else None
+        other_url = output[1] if len(output) > 1 else None
+    else:
+        # Single URL
+        vocals_url = str(output)
+        other_url = None
     
     # Download vocals
     if vocals_url:
@@ -72,6 +82,10 @@ def separate_vocals_replicate(audio_path, tmpdir):
         response = requests.get(other_url)
         with open(other_path, 'wb') as f:
             f.write(response.content)
+    else:
+        # Als geen accompaniment URL, maak leeg bestand
+        import shutil
+        shutil.copy(vocals_path, other_path)
     
     return vocals_path, other_path
 

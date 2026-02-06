@@ -45,27 +45,26 @@ def separate_vocals_replicate(audio_path, tmpdir):
     """Separate vocals using Replicate's MVSep MDX23 model"""
     with open(audio_path, "rb") as audio_file:
         output = replicate.run(
-            "lucataco/mvsep-mdx23-music-separation",
+            "lucataco/mvsep-mdx23-music-separation:510b9b91aec1bfa7d634e6c06ee80c18492fb0fc06aa1474533fbda90dd3dba4",
             input={
-                "audio": audio_file,
+                "audio": audio_file
             }
         )
     
-    # Output is dict with 'vocals', 'bass', 'drums', 'other' URLs
+    # Output is list with 4 items: bass, drums, vocals, other
     vocals_path = os.path.join(tmpdir, "vocals.wav")
     other_path = os.path.join(tmpdir, "accompaniment.wav")
     
-    # Download vocals
-    if output.get('vocals'):
-        response = requests.get(output['vocals'])
+    # Index 2 is vocals, index 3 is "other" (accompaniment)
+    # Download vocals (index 2)
+    if len(output) > 2:
         with open(vocals_path, 'wb') as f:
-            f.write(response.content)
+            f.write(output[2].read())
     
-    # Download "other" (everything except vocals)
-    if output.get('other'):
-        response = requests.get(output['other'])
+    # Download other/accompaniment (index 3)
+    if len(output) > 3:
         with open(other_path, 'wb') as f:
-            f.write(response.content)
+            f.write(output[3].read())
     
     return vocals_path, other_path
 

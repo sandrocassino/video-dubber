@@ -1,4 +1,3 @@
-app.py
 import streamlit as st
 import azure.cognitiveservices.speech as speechsdk
 from azure.ai.translation.text import TextTranslationClient

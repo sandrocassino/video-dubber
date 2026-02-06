@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import os
 import json
+import replicate
+import requests
 
 # Azure credentials
 SPEECH_KEY = st.secrets.get("SPEECH_KEY", "temp-key")
@@ -13,6 +15,9 @@ SPEECH_REGION = st.secrets.get("SPEECH_REGION", "westeurope")
 TRANSLATOR_KEY = st.secrets.get("TRANSLATOR_KEY", "temp-key")
 TRANSLATOR_ENDPOINT = st.secrets.get("TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com")
 TRANSLATOR_REGION = st.secrets.get("TRANSLATOR_REGION", "westeurope")
+
+# Replicate API
+os.environ["REPLICATE_API_TOKEN"] = st.secrets.get("REPLICATE_API_TOKEN", "")
 
 st.title("🎬 Video Dubbing voor Hans")
 st.write("Upload video, kies taal, download result")
@@ -33,7 +38,46 @@ target_lang = st.selectbox(
 uploaded_file = st.file_uploader("Upload video", type=["mp4", "mov", "avi"])
 
 def extract_audio(video_path, audio_path):
-    cmd = ['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', audio_path, '-y']
+    cmd = ['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', audio_path, '-y']
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def separate_vocals_replicate(audio_path, tmpdir):
+    """Separate vocals using Replicate's Demucs model"""
+    with open(audio_path, "rb") as audio_file:
+        output = replicate.run(
+            "cjwbw/demucs:07afda0d85f5b7f13d1c7fc89db7d1a69d82d45034358cbdc3cfea360c60a068",
+            input={
+                "audio": audio_file,
+                "model": "htdemucs",
+                "stems": "vocals"
+            }
+        )
+    
+    # Download separated stems
+    vocals_path = os.path.join(tmpdir, "vocals.wav")
+    other_path = os.path.join(tmpdir, "accompaniment.wav")
+    
+    # Output is dict with 'vocals' and 'other' URLs
+    vocals_url = output.get('vocals')
+    other_url = output.get('other')
+    
+    # Download vocals
+    if vocals_url:
+        response = requests.get(vocals_url)
+        with open(vocals_path, 'wb') as f:
+            f.write(response.content)
+    
+    # Download accompaniment
+    if other_url:
+        response = requests.get(other_url)
+        with open(other_path, 'wb') as f:
+            f.write(response.content)
+    
+    return vocals_path, other_path
+
+def convert_to_mono_16k(input_path, output_path):
+    """Convert audio for Azure Speech (16kHz mono)"""
+    cmd = ['ffmpeg', '-i', input_path, '-ar', '16000', '-ac', '1', output_path, '-y']
     subprocess.run(cmd, check=True, capture_output=True)
 
 def transcribe_audio_with_timing(audio_path):
@@ -50,7 +94,6 @@ def transcribe_audio_with_timing(audio_path):
     
     def recognized(evt):
         if evt.result.text:
-            # Offset is in 100-nanosecond units, convert to seconds
             offset_sec = evt.result.offset / 10000000.0
             duration_sec = evt.result.duration / 10000000.0
             segments.append({
@@ -124,22 +167,18 @@ def create_timed_audio(segments, language, output_path, tmpdir):
     current_time = 0
     
     for i, seg in enumerate(segments):
-        # Generate TTS for this segment
         segment_audio = os.path.join(tmpdir, f"segment_{i}.wav")
         synthesize_segment(seg['text'], language, segment_audio)
         segment_files.append(segment_audio)
         
-        # Calculate silence needed before this segment
         silence_duration = seg['start'] - current_time
         
         if silence_duration > 0:
-            # Add silence
             filter_parts.append(f"aevalsrc=0:d={silence_duration}[silence{i}];")
             filter_parts.append(f"[silence{i}][{i}:a]concat=n=2:v=0:a=1[a{i}];")
         else:
             filter_parts.append(f"[{i}:a]anull[a{i}];")
         
-        # Get duration of generated audio
         result = subprocess.run(
             ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', segment_audio],
             capture_output=True, text=True
@@ -147,17 +186,30 @@ def create_timed_audio(segments, language, output_path, tmpdir):
         duration = float(json.loads(result.stdout)['format']['duration'])
         current_time = seg['start'] + duration
     
-    # Build ffmpeg command
     inputs = []
     for sf in segment_files:
         inputs.extend(['-i', sf])
     
-    # Concatenate all segments
     concat_filter = ''.join(filter_parts)
     concat_inputs = ''.join([f"[a{i}]" for i in range(len(segments))])
     full_filter = f"{concat_filter}{concat_inputs}concat=n={len(segments)}:v=0:a=1[out]"
     
     cmd = ['ffmpeg'] + inputs + ['-filter_complex', full_filter, '-map', '[out]', output_path, '-y']
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def mix_vocals_and_background(vocals_path, background_path, output_path):
+    """Mix new vocals with original background audio"""
+    cmd = [
+        'ffmpeg',
+        '-i', vocals_path,
+        '-i', background_path,
+        '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest[out]',
+        '-map', '[out]',
+        '-ar', '44100',
+        '-ac', '2',
+        output_path,
+        '-y'
+    ]
     subprocess.run(cmd, check=True, capture_output=True)
 
 def merge_audio_video(video_path, audio_path, output_path):
@@ -176,27 +228,36 @@ if uploaded_file and st.button("🚀 Start Dubbing"):
                 audio_path = os.path.join(tmpdir, "audio.wav")
                 extract_audio(video_path, audio_path)
                 
-                st.write("🎤 Transcriptie met timing...")
-                segments = transcribe_audio_with_timing(audio_path)
+                st.write("🎵 Audio splitsen (Replicate AI)...")
+                vocals_path, background_path = separate_vocals_replicate(audio_path, tmpdir)
                 
-                # Show original text
+                st.write("🎤 Vocals naar mono 16kHz...")
+                vocals_mono = os.path.join(tmpdir, "vocals_mono.wav")
+                convert_to_mono_16k(vocals_path, vocals_mono)
+                
+                st.write("🎤 Transcriptie met timing...")
+                segments = transcribe_audio_with_timing(vocals_mono)
+                
                 original_text = ' '.join([s['text'] for s in segments])
                 st.text_area("Engels", original_text, height=100)
                 
                 st.write("🌍 Vertalen...")
                 translated_segments = translate_segments(segments, target_lang)
                 
-                # Show translated text
                 translated_text = ' '.join([s['text'] for s in translated_segments])
                 st.text_area(f"Vertaald ({target_lang})", translated_text, height=100)
                 
-                st.write("🗣️ Spraak genereren met timing...")
-                new_audio_path = os.path.join(tmpdir, "dubbed.wav")
-                create_timed_audio(translated_segments, target_lang, new_audio_path, tmpdir)
+                st.write("🗣️ Nieuwe vocals genereren...")
+                new_vocals_path = os.path.join(tmpdir, "dubbed_vocals.wav")
+                create_timed_audio(translated_segments, target_lang, new_vocals_path, tmpdir)
+                
+                st.write("🎵 Vocals + background mixen...")
+                mixed_audio = os.path.join(tmpdir, "mixed.wav")
+                mix_vocals_and_background(new_vocals_path, background_path, mixed_audio)
                 
                 st.write("🎬 Video samenvoegen...")
                 output_path = os.path.join(tmpdir, "output.mp4")
-                merge_audio_video(video_path, new_audio_path, output_path)
+                merge_audio_video(video_path, mixed_audio, output_path)
                 
                 with open(output_path, "rb") as f:
                     st.download_button("⬇️ Download", f.read(), file_name=f"dubbed_{uploaded_file.name}", mime="video/mp4")

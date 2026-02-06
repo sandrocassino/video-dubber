@@ -154,6 +154,14 @@ def synthesize_segment(text, language, output_path):
 
 def create_timed_audio(segments, language, output_path, tmpdir):
     """Create audio with proper timing using ffmpeg"""
+    
+    # Check if we have any segments
+    if not segments or len(segments) == 0:
+        # Create 1 second of silence
+        cmd = ['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-t', '1', output_path, '-y']
+        subprocess.run(cmd, check=True, capture_output=True)
+        return
+    
     segment_files = []
     filter_parts = []
     
@@ -221,17 +229,19 @@ if uploaded_file and st.button("🚀 Start Dubbing"):
                 audio_path = os.path.join(tmpdir, "audio.wav")
                 extract_audio(video_path, audio_path)
                 
-                st.write("🎵 Audio splitsen (Replicate AI)...")
-                vocals_path, background_path = separate_vocals_replicate(audio_path, tmpdir)
-                
-                st.write("🎤 Vocals naar mono 16kHz...")
-                vocals_mono = os.path.join(tmpdir, "vocals_mono.wav")
-                convert_to_mono_16k(vocals_path, vocals_mono)
+                st.write("🎤 Originele audio voorbereiden voor transcriptie...")
+                audio_mono = os.path.join(tmpdir, "audio_mono.wav")
+                convert_to_mono_16k(audio_path, audio_mono)
                 
                 st.write("🎤 Transcriptie met timing...")
-                segments = transcribe_audio_with_timing(vocals_mono)
+                segments = transcribe_audio_with_timing(audio_mono)
                 
+                # Check if we got any transcription
                 original_text = ' '.join([s['text'] for s in segments])
+                if not segments or not original_text.strip():
+                    st.warning("⚠️ Geen spraak gedetecteerd in de video. Probeer een video met duidelijkere Engelse spraak.")
+                    st.stop()
+                
                 st.text_area("Engels", original_text, height=100)
                 
                 st.write("🌍 Vertalen...")
@@ -243,6 +253,9 @@ if uploaded_file and st.button("🚀 Start Dubbing"):
                 st.write("🗣️ Nieuwe vocals genereren...")
                 new_vocals_path = os.path.join(tmpdir, "dubbed_vocals.wav")
                 create_timed_audio(translated_segments, target_lang, new_vocals_path, tmpdir)
+                
+                st.write("🎵 Audio splitsen voor background behoud (Replicate AI)...")
+                vocals_path, background_path = separate_vocals_replicate(audio_path, tmpdir)
                 
                 st.write("🎵 Vocals + background mixen...")
                 mixed_audio = os.path.join(tmpdir, "mixed.wav")
